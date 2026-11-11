@@ -1,7 +1,7 @@
 # 1. Ignore everything inside the data directory
 data/*
 # 2. Whitelist the specific file
-!data/TinyStoriesV2-GPT4-valid.bin
+# !data/TinyStoriesV2-GPT4-valid.bin
 
 
 # Byte-compiled / optimized / DLL files
