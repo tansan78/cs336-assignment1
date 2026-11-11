@@ -4,6 +4,8 @@ data/*
 # !data/TinyStoriesV2-GPT4-valid.bin
 
 
+.vscode
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
