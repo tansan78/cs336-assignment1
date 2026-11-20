@@ -407,6 +407,7 @@ def run_transformer_block(
     return combined + run_swiglu(d_model, d_ff, weights['ffn.w1.weight'], weights['ffn.w2.weight'], weights['ffn.w3.weight'], rmsnorm2)
 
 
+@torch.compile
 def run_transformer_lm(
     vocab_size: int,
     context_length: int,
@@ -614,7 +615,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         softmax normalizing the specified `dim`.
     """
     leveled_in_features = in_features - torch.max(in_features, dim=dim, keepdim=True)[0]
-    return torch.exp(leveled_in_features) / torch.sum(torch.exp(leveled_in_features), dim=dim, keepdim=True)
+    exp_val = torch.exp(leveled_in_features)
+    return exp_val / torch.sum(exp_val, dim=dim, keepdim=True)
 
 
 def run_cross_entropy(
@@ -636,8 +638,6 @@ def run_cross_entropy(
 
     # print(inputs.shape, targets.shape)
     batch_indices = torch.arange(inputs.shape[0], device=inputs.device)
-    nominator_val = torch.sum(leveled_input[batch_indices, targets.to(torch.int)])
-    
     target_logits = leveled_input[batch_indices, targets.to(torch.int)]
     nominator_val = torch.sum(target_logits)
 
@@ -664,17 +664,16 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
     eps = 1e-6
 
     grads = [p.grad for p in parameters if p.grad is not None]
+    
+    squared_grads = torch._foreach_pow(grads, 2.0)
+    l2_norm = torch.sqrt(torch.stack([torch.sum(sq) for sq in squared_grads]).sum())
 
-    l2_norm = torch.sqrt(
-        sum(
-            torch.sum(g.pow(2)) for g in grads))
     if l2_norm < max_l2_norm:
         return
     
     c = max_l2_norm / (l2_norm + eps)
-    for g in grads:
-        with torch.no_grad():
-            g.mul_(c)
+    with torch.no_grad():
+         torch._foreach_mul_(grads, c)
 
 
 class AdamWOptimizer(torch.optim.Optimizer):
@@ -716,6 +715,8 @@ class AdamWOptimizer(torch.optim.Optimizer):
 
                 lr_t = lr * (math.sqrt(1 - beta2 ** t)) / (1 - beta1 ** t)
                 p.data -= lr_t * state['m'] / (torch.sqrt(state['v']) + eps)
+
+                p.grad = None
 
         return loss
     

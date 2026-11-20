@@ -32,6 +32,8 @@ class TrainPipeline:
 
         self.tb_dir = tb_dir
 
+        self.scaler = torch.amp.GradScaler(self.device,enabled=True if device == 'cuda' else False)
+
     @classmethod
     def create(cls, data_base_dir, run_id=None, test=False, device='cpu', tb_base_dir=None):
         tokenizer = get_tokenizer_from_vocab_merges_path(
@@ -88,6 +90,10 @@ class TrainPipeline:
         ## TODO; load weights
         self.model.init_params()
 
+        assert (self.config.pipeline_config.ac_budget >= 0 and
+                self.config.pipeline_config.ac_budget <= 1.0), f"invalid ac budget: {self.config.pipeline_config.ac_budget}"
+        torch._functorch.config.activation_memory_budget = self.config.pipeline_config.ac_budget
+
     def train(self, input_tokenized_file, steps=1_000):
         dataset = np.memmap(input_tokenized_file, dtype=np.uint16, mode='r')
 
@@ -99,15 +105,20 @@ class TrainPipeline:
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ],
-            schedule=torch.profiler.schedule(wait=100, warmup=0, active=5, repeat=1),
+            schedule=torch.profiler.schedule(wait=100, warmup=3, active=5, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tb_dir),
             record_shapes=True,
             profile_memory=True,
             with_stack=True,
         ) as prof:
+            start_ts = time.time()
+            examples = 0
             for step in range(steps):
                 if step == 0:
                     torch.cuda.memory._record_memory_history()
+                elif step == 3:
+                    torch.cuda.memory._dump_snapshot(f"{self.tb_dir}/my_snapshot.pickle")
+                    torch.cuda.memory._record_memory_history(enabled=False)
 
                 with torch.profiler.record_function(f"## get_batch step {step} ##"):
                     batch, labels = run_get_batch(
@@ -117,14 +128,23 @@ class TrainPipeline:
                         self.device
                     )
 
-                if step == 3:
-                    torch.cuda.memory._dump_snapshot(f"{self.tb_dir}/my_snapshot.pickle")
+                try:
+                    loss = self.train_step(step, batch, labels)
+                except torch.OutOfMemoryError as e:
+                    if step < 3:
+                        torch.cuda.memory._dump_snapshot(f"{self.tb_dir}/oom_snapshot.pickle")
+                    raise e
+                
+                examples += batch.shape[0]
 
-                loss = self.train_step(step, batch, labels)
                 if step % self.config.pipeline_config.loss_log_freq == 0:
+                    qps = examples / (time.time() - start_ts)
+                    start_ts =  time.time()
+                    examples = 0
+
                     loss_val = loss.item()
-                    logging.info(f'{step=}: loss={loss_val}')
-                    history.append({'step': step, 'loss': loss_val})
+                    logging.info(f'{step=}: loss={loss_val}, qps={qps}')
+                    history.append({'step': step, 'loss': loss_val, 'qps': qps})
                 
                 prof.step()
 
@@ -138,24 +158,32 @@ class TrainPipeline:
                             last_saved_pos += 1
 
     def train_step(self, step, in_indices, labels):
-        with torch.profiler.record_function(f"## foward step {step} ##"):
+        amp_dtype = torch.bfloat16 if self.device == 'cuda' else torch.float32
+        with torch.profiler.record_function(f"## foward step {step} ##") and \
+            torch.autocast(device_type=self.device, dtype=amp_dtype):
             lm_output = self.model(in_indices)
         
-        self.model.zero_grad()
+        # zero'ed in optimizer
+        # self.model.zero_grad()
 
-        with torch.profiler.record_function(f"## loss step {step} ##"):
+        with torch.profiler.record_function(f"## loss step {step} ##") and \
+            torch.autocast(device_type=self.device, dtype=amp_dtype):
             voc_size = lm_output.shape[-1]
             loss = run_cross_entropy(lm_output.reshape(-1, voc_size), labels.reshape(-1))
         # print(loss.shape)
 
         with torch.profiler.record_function(f"## backward step {step} ##"):
-            loss.backward()
+            self.scaler.scale(loss).backward()
+            # loss.backward()
 
+            self.scaler.unscale_(self.optimizer)
             run_gradient_clipping(self.model.parameters(),
                                 max_l2_norm=self.config.pipeline_config.max_l2_norm)
 
         with torch.profiler.record_function(f"## optimizer step {step} ##"):
-            self.optimizer.step()
+            # self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
         return loss
     

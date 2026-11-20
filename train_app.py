@@ -31,10 +31,10 @@ def train():
 
 
     pipeline = TrainPipeline.create(data_base_dir='./data',
-                                    run_id=2, 
+                                    run_id=8, 
                                     test=False, 
                                     device='cuda',
                                     tb_base_dir='/tb_logs')
     pipeline.before_training()
     pipeline.train(input_tokenized_file='./data/TinyStoriesV2-GPT4-valid.bin',
-                   steps=1_000)
+                   steps=200)

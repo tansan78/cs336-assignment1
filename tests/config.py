@@ -5,11 +5,11 @@ from typing import Tuple
 
 @dataclass
 class TransformerConfig:
-    d_model: int = 1024
-    d_ff: int = 512
+    d_model: int = 512
+    d_ff: int = 1024
     num_heads: int = 16
 
-    num_layers: int = 32
+    num_layers: int = 8
 
     max_seq_len: int = 1024
     rope_theta: float = 1e4
@@ -29,6 +29,8 @@ class PipelineConfig:
     max_l2_norm: float = 1.0
     batch_size: int = 128
     context_length: int = 256
+
+    ac_budget: float = 0.2
 
     loss_log_freq: int = 10
     checkpoint_freq: int = 100
